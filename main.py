@@ -13,7 +13,7 @@ from telegram.ext import (
 )
 
 # ---------------- CONFIG ----------------
-BOT_TOKEN = os.environ.get("8372081478:AAH-2T20JP0LBH2SQMFJbUbObl_DJqfjB2w")  # set env var BOT_TOKEN
+BOT_TOKEN = os.environ.get("BOT_TOKEN")  # set env var BOT_TOKEN
 
 CHAR_FILE = "characters.json"   # expects a list of character dicts
 INV_FILE = "inventory.json"    # expects a dict: { "user_id": [char_obj, ...], ... }
