@@ -15,7 +15,7 @@ from telegram.ext import (
 
 # ================= CONFIG =================
 
-BOT_TOKEN = os.environ.get("8372081478:AAHG02438ZuhXf3minIywW3LzOtkxhDrBt8")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
 CHAR_FILE = "characters.json"
 INV_FILE = "inventory.json"
