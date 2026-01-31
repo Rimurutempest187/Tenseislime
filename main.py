@@ -15,7 +15,10 @@ from telegram.ext import (
 
 # ================= CONFIG =================
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")  # <-- FIXED
+
+if not BOT_TOKEN:
+    raise ValueError("❌ BOT_TOKEN not found. Please export BOT_TOKEN first.")
 
 CHAR_FILE = "characters.json"
 INV_FILE = "inventory.json"
@@ -23,7 +26,6 @@ COIN_FILE = "coins.json"
 ADMINS_FILE = "admins.json"
 
 START_COINS = 100
-ITEMS_PER_PAGE = 5
 
 RARITY_RATE = {
     "Common": 60,
@@ -160,7 +162,7 @@ async def summon(update: Update, context):
     chars = load_json(CHAR_FILE, [])
 
     if not chars:
-        await update.message.reply_text("❌ No characters yet.")
+        await update.message.reply_text("❌ No characters.")
         return
 
     rarity = roll_rarity()
@@ -199,7 +201,7 @@ async def send_store(chat_id, context):
     keyboard = [
         [
             InlineKeyboardButton("🛒 Buy", callback_data=f"buy_{char['id']}"),
-            InlineKeyboardButton("➡ Next", callback_data="store_next")
+            InlineKeyboardButton("➡ Next", callback_data="next_store")
         ]
     ]
 
@@ -225,7 +227,7 @@ async def store_btn(update: Update, context):
 
     init_user(uid)
 
-    if q.data == "store_next":
+    if q.data == "next_store":
 
         await send_store(q.message.chat_id, context)
         return
@@ -246,7 +248,7 @@ async def store_btn(update: Update, context):
         inv = load_json(INV_FILE, {})
 
         if coins[uid] < char["price"]:
-            await q.edit_message_caption("❌ Not enough coins.")
+            await q.edit_message_caption("❌ Not enough coins")
             return
 
         coins[uid] -= char["price"]
@@ -313,8 +315,8 @@ async def ranking(update: Update, context):
     for uid in coins:
 
         try:
-            chat = await context.bot.get_chat(int(uid))
-            name = chat.first_name
+            user = await context.bot.get_chat(int(uid))
+            name = user.first_name
         except:
             name = uid
 
@@ -333,32 +335,6 @@ async def ranking(update: Update, context):
     await update.message.reply_text(msg)
 
 
-# ================= ADMIN =================
-
-
-async def add_admin(update: Update, context):
-
-    uid = str(update.effective_user.id)
-
-    admins = load_json(ADMINS_FILE, [])
-
-    if not admins:
-        admins.append(uid)
-        save_json(ADMINS_FILE, admins)
-
-    if uid not in admins:
-        return
-
-    if not context.args:
-        return
-
-    admins.append(context.args[0])
-
-    save_json(ADMINS_FILE, admins)
-
-    await update.message.reply_text("✅ Admin added.")
-
-
 # ================= ADD COINS =================
 
 
@@ -372,9 +348,15 @@ async def addcoins(update: Update, context):
     if not update.message.reply_to_message:
         return
 
+    if not context.args:
+        return
+
     target = str(update.message.reply_to_message.from_user.id)
 
-    amount = int(context.args[0])
+    try:
+        amount = int(context.args[0])
+    except:
+        return
 
     coins = load_json(COIN_FILE, {})
 
@@ -462,12 +444,9 @@ def main():
     app.add_handler(CommandHandler("store", store))
     app.add_handler(CommandHandler("inventory", inventory))
     app.add_handler(CommandHandler("ranking", ranking))
-
-    app.add_handler(CommandHandler("addadmin", add_admin))
     app.add_handler(CommandHandler("addcoins", addcoins))
 
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
-
     app.add_handler(CallbackQueryHandler(store_btn))
 
     print("Bot running...")
