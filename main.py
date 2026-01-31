@@ -13,7 +13,7 @@ from telegram.ext import (
 
 # ================= CONFIG =================
 
-BOT_TOKEN = "PUT_NEW_TOKEN_HERE"
+BOT_TOKEN = "8372081478:AAH-2T20JP0LBH2SQMFJbUbObl_DJqfjB2w"
 
 CHAR_FILE = "characters.json"
 INV_FILE = "inventory.json"
