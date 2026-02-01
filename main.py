@@ -16,6 +16,23 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+# ================= KEEP ALIVE =================
+
+from flask import Flask
+from threading import Thread
+
+app_web = Flask('')
+
+@app_web.route('/')
+def home():
+    return "Bot is alive!"
+
+def run_web():
+    app_web.run(host='0.0.0.0', port=8080)
+
+def keep_alive():
+    t = Thread(target=run_web)
+    t.start()
 
 # =========== CONFIG ===========
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -697,6 +714,7 @@ async def editchar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # =========== START BOT ===========
 def main():
+    keep_alive()   # <-- ADD THIS
     migrate_characters_from_json()
     if not BOT_TOKEN:
         raise SystemExit("BOT_TOKEN missing. export BOT_TOKEN in your environment.")
