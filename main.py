@@ -235,63 +235,48 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     await update.message.reply_text(f"✅ Character saved: {name}")
 
-# =========== /upload command (reply to photo) ===========
-# usage:
-# reply to photo with: /upload Benimaru|Epic|Ogre|450|200
-# or: /upload 12|Benimaru|Epic|Ogre|450|200
-
-async def upload_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ================= UPLOAD COMMAND =================
+async def upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if not is_admin(uid):
-        await update.message.reply_text("❌ Admin only.")
+        await update.message.reply_text("❌ Admin only")
         return
-    if not update.message.reply_to_message or not update.message.reply_to_message.photo:
-        await update.message.reply_text("❌ Reply to a photo (the photo) with /upload command.")
+
+    # Photo detection
+    photo_msg = None
+    if update.message.photo:
+        photo_msg = update.message
+    elif update.message.reply_to_message and update.message.reply_to_message.photo:
+        photo_msg = update.message.reply_to_message
+    else:
+        await update.message.reply_text("❌ Send a photo with command or reply to a photo")
         return
-    args_text = " ".join(context.args).strip()
-    if not args_text:
-        await update.message.reply_text("❌ Usage: /upload [ID|]Name|Rarity|Faction|Power|Price")
+
+    if not context.args:
+        await update.message.reply_text("❌ Usage: /upload Name|Rarity|Faction|Power|Price")
         return
-    parts = [p.strip() for p in args_text.split("|")]
-    if len(parts) not in (5, 6):
-        await update.message.reply_text("❌ Wrong format. Provide 5 or 6 parts separated by |.")
-        return
+
     try:
-        if len(parts) == 6:
-            cid = int(parts[0])
-            name = parts[1]
-            rarity = parts[2]
-            faction = parts[3]
-            power = int(parts[4])
-            price = int(parts[5])
-        else:
-            cid = None
-            name, rarity, faction, power_str, price_str = parts
-            power = int(power_str)
-            price = int(price_str)
-    except ValueError:
-        await update.message.reply_text("❌ ID/power/price must be integers (ID optional).")
-        return
-    # duplicate name check
-    c.execute("SELECT id FROM characters WHERE LOWER(name)=?", (name.lower(),))
-    if c.fetchone():
-        await update.message.reply_text("❌ Character with that name already exists.")
-        return
-    file_id = update.message.reply_to_message.photo[-1].file_id
-    try:
-        if cid is not None:
-            c.execute("INSERT INTO characters (id, name, rarity, faction, power, price, file_id) VALUES (?,?,?,?,?,?,?)",
-                      (cid, name, rarity, faction, power, price, file_id))
-            new_id = cid
-        else:
-            c.execute("INSERT INTO characters (name, rarity, faction, power, price, file_id) VALUES (?,?,?,?,?,?)",
-                      (name, rarity, faction, power, price, file_id))
-            new_id = c.lastrowid
-        conn.commit()
+        # parse args
+        data = "|".join(context.args).split("|")
+        if len(data) != 5:
+            await update.message.reply_text("❌ Format wrong. Use: Name|Rarity|Faction|Power|Price")
+            return
+        name, rarity, faction, power, price = data
+        power = int(power.strip())
+        price = int(price.strip())
     except Exception as e:
-        await update.message.reply_text(f"❌ DB error: {e}")
+        await update.message.reply_text(f"❌ Error parsing: {e}")
         return
-    await update.message.reply_text(f"✅ Character saved. Name: {name} (ID: {new_id})")
+
+    # Save to DB
+    c.execute("""
+    INSERT INTO characters (name, rarity, faction, power, price, file_id)
+    VALUES (?,?,?,?,?,?)
+    """, (name.strip(), rarity.strip(), faction.strip(), power, price, photo_msg.photo[-1].file_id))
+    conn.commit()
+    await update.message.reply_text(f"✅ Character '{name.strip()}' saved")
+
 
 # =========== SUMMON ===========
 # Summon 1 => send photo + caption
