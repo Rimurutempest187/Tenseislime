@@ -1,11 +1,11 @@
-# main.py — Tensura World (complete, fixed, with /tops ranking)
+# main.py — Tensura World (final fixed version with /tops)
 import os
 import random
 import sqlite3
 import logging
 import time
 import json
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -19,7 +19,7 @@ from telegram.ext import (
 
 # =========== CONFIG ===========
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-OWNER_ID = 1812962224  # <-- replace with your Telegram ID (integer)
+OWNER_ID = 1812962224  # <-- replace with your numeric Telegram ID
 
 DATA_DIR = "data"
 DB_FILE = os.path.join(DATA_DIR, "gacha.db")
@@ -529,7 +529,6 @@ async def tops(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def tops_btn(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    # build the same keyboard to keep buttons after edit
     keyboard = [
         [
             InlineKeyboardButton("Coins Ranking", callback_data="rank_coins"),
@@ -537,7 +536,6 @@ async def tops_btn(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
     ]
     if q.data == "rank_coins":
-        # top 10 users by coins
         c.execute("SELECT id, coins FROM users ORDER BY coins DESC LIMIT 10")
         rows = c.fetchall()
         if not rows:
@@ -545,7 +543,6 @@ async def tops_btn(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             msg = "Coins Ranking\n\n"
             for i, (user_id, coins) in enumerate(rows, 1):
-                # try to get username or first_name
                 try:
                     user = await context.bot.get_chat(int(user_id))
                     name = getattr(user, "first_name", None) or getattr(user, "username", None) or str(user_id)
@@ -556,7 +553,6 @@ async def tops_btn(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if q.data == "rank_chars":
-        # top 10 users by total character power (sum of power * count)
         c.execute("""
         SELECT u.id, COALESCE(SUM(ch.power * inv.count), 0) AS total_power
         FROM users u
