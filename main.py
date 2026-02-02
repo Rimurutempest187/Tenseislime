@@ -220,73 +220,198 @@ async def daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ================= ADMIN UPLOAD SYSTEM =================
 async def upload_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
+
     if not is_admin(uid):
-        await update.message.reply_text("⚠ Admin only.")
+        await update.message.reply_text("⚠️ Admin only.")
         return
-    # get attached photo or reply
+
+    # ================= GET PHOTO =================
     photo_msg = None
+
     if update.message.photo:
         photo_msg = update.message
+
     elif update.message.reply_to_message and update.message.reply_to_message.photo:
         photo_msg = update.message.reply_to_message
+
     else:
-        await update.message.reply_text("📷 Send a photo with this command or reply to a photo.")
+        await update.message.reply_text("📷 Photo တစ်ပုံနဲ့ /upload သုံးပါ၊ ဒါမှမဟုတ် Photo ကို Reply လုပ်ပါ။")
         return
 
+
+    # ================= GET ARGS =================
     args_text = " ".join(context.args).strip()
+
+
+    # ==================================================
+    # CASE 1: Caption Format (name: xxx)
+    # ==================================================
     if not args_text:
-        # fallback to caption parsing
+
         caption = update.message.caption or ""
-        if caption:
-            data = {}
-            for line in caption.splitlines():
-                if ":" not in line: continue
-                k, v = line.split(":", 1)
-                data[k.strip().lower()] = v.strip()
-            required = ["name","rarity","faction","power","price"]
-            if not all(k in data for k in required):
-                await update.message.reply_text("Caption must have: Name, Rarity, Faction, Power, Price")
-                return
-            try:
-                power = int(data["power"]); price=int(data["price"])
-            except:
-                await update.message.reply_text("Power and Price must be integers.")
-                return
-            name = data["name"]
-            c.execute("SELECT id FROM characters WHERE LOWER(name)=?", (name.lower(),))
-            if c.fetchone():
-                await update.message.reply_text("Character name already exists.")
-                return
-            file_id = photo_msg.photo[-1].file_id
-            c.execute("INSERT INTO characters (name, rarity, faction, power, price, file_id) VALUES (?,?,?,?,?,?)",
-                      (name, data["rarity"], data["faction"], power, price, file_id))
-            conn.commit()
-            await update.message.reply_text(f"✅ Character saved: {name}")
+
+        if not caption:
+            await update.message.reply_text(
+                "Usage:\n"
+                "/upload Name|Rarity|Faction|Power|Price\n"
+                "OR caption format"
+            )
             return
 
-        await update.message.reply_text("Usage: /upload Name|Rarity|Faction|Power|Price")
+
+        data = {}
+
+        for line in caption.splitlines():
+            if ":" not in line:
+                continue
+
+            k, v = line.split(":", 1)
+            data[k.strip().lower()] = v.strip()
+
+
+        required = ["name", "rarity", "faction", "power", "price"]
+
+        if not all(k in data for k in required):
+            await update.message.reply_text(
+                "Caption မှာ ဒီ field တွေပါရပါမယ်:\n"
+                "name, rarity, faction, power, price"
+            )
+            return
+
+
+        try:
+            power = int(data["power"])
+            price = int(data["price"])
+        except:
+            await update.message.reply_text("⚠️ Power / Price က number ဖြစ်ရပါမယ်။")
+            return
+
+
+        name = data["name"]
+        rarity = data["rarity"]
+        faction = data["faction"]
+
+        file_id = photo_msg.photo[-1].file_id
+
+
+        # ===== INSERT (NO NAME CHECK) =====
+        try:
+            c.execute("""
+                INSERT INTO characters
+                (name, rarity, faction, power, price, file_id)
+                VALUES (?,?,?,?,?,?)
+            """, (name, rarity, faction, power, price, file_id))
+
+            conn.commit()
+
+            new_id = c.lastrowid
+
+        except Exception as e:
+            await update.message.reply_text(f"❌ DB Error: {e}")
+            return
+
+
+        await update.message.reply_text(
+            f"✅ Character Saved!\n"
+            f"ID: {new_id}\n"
+            f"Name: {name}"
+        )
+
         return
 
-    # pipe format parsing
+
+    # ==================================================
+    # CASE 2: Pipe Format ( /upload Name|Rarity|... )
+    # ==================================================
+
     parts = [p.strip() for p in args_text.split("|")]
-    if len(parts) != 5:
-        await update.message.reply_text("Usage: /upload Name|Rarity|Faction|Power|Price")
+
+
+    # Optional ID Support
+    # 6 parts => ID|Name|Rarity|Faction|Power|Price
+    # 5 parts => Name|Rarity|Faction|Power|Price
+
+    if len(parts) not in (5, 6):
+        await update.message.reply_text(
+            "Usage:\n"
+            "/upload Name|Rarity|Faction|Power|Price\n"
+            "OR\n"
+            "/upload ID|Name|Rarity|Faction|Power|Price"
+        )
         return
+
+
     try:
-        name, rarity, faction, power_str, price_str = parts
-        power = int(power_str); price = int(price_str)
+
+        if len(parts) == 6:
+
+            cid = int(parts[0])
+            name = parts[1]
+            rarity = parts[2]
+            faction = parts[3]
+            power = int(parts[4])
+            price = int(parts[5])
+
+            # ===== CHECK ID ONLY =====
+            c.execute("SELECT 1 FROM characters WHERE id=?", (cid,))
+            if c.fetchone():
+                await update.message.reply_text(f"❌ ID {cid} already exists.")
+                return
+
+        else:
+
+            cid = None
+            name, rarity, faction, p, pr = parts
+            power = int(p)
+            price = int(pr)
+
+
     except:
-        await update.message.reply_text("Power and Price must be integers.")
+        await update.message.reply_text("⚠️ ID / Power / Price က number ဖြစ်ရပါမယ်။")
         return
-    c.execute("SELECT id FROM characters WHERE LOWER(name)=?", (name.lower(),))
-    if c.fetchone():
-        await update.message.reply_text("Character name already exists.")
-        return
+
+
     file_id = photo_msg.photo[-1].file_id
-    c.execute("INSERT INTO characters (name, rarity, faction, power, price, file_id) VALUES (?,?,?,?,?,?)",
-              (name, rarity, faction, power, price, file_id))
-    conn.commit()
-    await update.message.reply_text(f"✅ Character saved: {name}")
+
+
+    # ================= INSERT =================
+    try:
+
+        if cid is not None:
+
+            c.execute("""
+                INSERT INTO characters
+                (id, name, rarity, faction, power, price, file_id)
+                VALUES (?,?,?,?,?,?,?)
+            """, (cid, name, rarity, faction, power, price, file_id))
+
+            new_id = cid
+
+        else:
+
+            c.execute("""
+                INSERT INTO characters
+                (name, rarity, faction, power, price, file_id)
+                VALUES (?,?,?,?,?,?)
+            """, (name, rarity, faction, power, price, file_id))
+
+            new_id = c.lastrowid
+
+
+        conn.commit()
+
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ DB Error: {e}")
+        return
+
+
+    await update.message.reply_text(
+        f"✅ Character Uploaded!\n"
+        f"ID: {new_id}\n"
+        f"Name: {name}"
+    )
+
 
 # ================= SUMMON =================
 def choose_chars(times: int) -> List[Tuple]:
