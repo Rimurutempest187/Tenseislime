@@ -1,4 +1,4 @@
-`````````````````````````````import os
+import os
 import random
 import sqlite3
 import logging
@@ -70,7 +70,11 @@ logger = logging.getLogger()
 if not os.path.exists(DATA_DIR):
     os.makedirs(DATA_DIR)
 
-conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+conn = sqlite3.connect(
+    DB_FILE,
+    check_same_thread=False,
+    timeout=30
+)
 c = conn.cursor()
 
 # Users
@@ -288,26 +292,38 @@ async def store_cmd(update: Update, context):
 async def store_btn(update: Update, context):
     q = update.callback_query
     await q.answer()
+
     uid = q.from_user.id
     init_user(uid)
+
+    # NEXT
     if q.data == "next_store":
+        await q.message.delete()
         await send_store(q.message.chat.id, context)
         return
+
+    # BUY
     if q.data.startswith("buy_"):
         cid = int(q.data.split("_")[1])
+
         c.execute("SELECT * FROM characters WHERE id=?", (cid,))
         char = c.fetchone()
+
         if not char:
             await q.edit_message_caption("❌ Character not found")
             return
+
         c.execute("SELECT coins FROM users WHERE id=?", (uid,))
         coins = c.fetchone()[0]
+
         if coins < char[5]:
             await q.edit_message_caption("❌ Not enough coins")
             return
+
         c.execute("UPDATE users SET coins=coins-? WHERE id=?", (char[5], uid))
         add_inventory(uid, cid)
         conn.commit()
+
         await q.edit_message_caption(f"✅ Bought {char[1]}")
 # ================= INVENTORY =================
 
@@ -363,75 +379,105 @@ async def inv_btn(update: Update, context):
         idx = int(q.data.split("_")[1])
     except:
         idx = 0
+    await q.message.delete()
     await send_inventory_page(q.message.chat.id, context, pages, idx)
 
-
 # ================= ADMIN UPLOAD =================
-
 async def upload_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     uid = update.effective_user.id
+
     if not is_admin(uid):
         await update.message.reply_text("⚠ Admin only")
         return
 
-    photo_msg = update.message.photo and update.message or \
-                update.message.reply_to_message and update.message.reply_to_message or None
+    # ===== Get Photo =====
+    photo_msg = None
+
+    if update.message.photo:
+        photo_msg = update.message
+
+    elif update.message.reply_to_message and update.message.reply_to_message.photo:
+        photo_msg = update.message.reply_to_message
 
     if not photo_msg:
-        await update.message.reply_text("📷 Photo with /upload or reply to a photo")
+        await update.message.reply_text("📷 Send photo with /upload or reply to photo")
         return
 
+    # ===== Get Args =====
     args_text = " ".join(context.args).strip()
 
-    # ===== Pipe format: Name|Rarity|Faction|Power|Price =====
+    # ================= CAPTION MODE =================
     if not args_text:
+
         caption = update.message.caption or ""
+
         if not caption:
             await update.message.reply_text("Usage: /upload Name|Rarity|Faction|Power|Price")
             return
 
         data = {}
+
         for line in caption.splitlines():
             if ":" not in line:
                 continue
+
             k, v = line.split(":", 1)
             data[k.strip().lower()] = v.strip()
 
-        required = ["name","rarity","faction","power","price"]
+        required = ["name", "rarity", "faction", "power", "price"]
+
         if not all(k in data for k in required):
-            await update.message.reply_text("Caption must include: name, rarity, faction, power, price")
+            await update.message.reply_text(
+                "Caption must include:\nname, rarity, faction, power, price"
+            )
             return
 
         try:
             power = int(data["power"])
             price = int(data["price"])
         except:
-            await update.message.reply_text("Power/Price must be integers")
+            await update.message.reply_text("Power / Price must be numbers")
             return
 
         name = data["name"]
         rarity = data["rarity"]
         faction = data["faction"]
+
+        # Warning if name exists
+        c.execute("SELECT id FROM characters WHERE name=?", (name,))
+        if c.fetchone():
+            await update.message.reply_text("⚠ Name already exists (Allowed)")
+
         file_id = photo_msg.photo[-1].file_id
 
         try:
             c.execute("""
-            INSERT INTO characters (name, rarity, faction, power, price, file_id)
-            VALUES (?,?,?,?,?,?)
+                INSERT INTO characters
+                (name, rarity, faction, power, price, file_id)
+                VALUES (?,?,?,?,?,?)
             """, (name, rarity, faction, power, price, file_id))
+
             conn.commit()
             new_id = c.lastrowid
+
         except Exception as e:
             await update.message.reply_text(f"❌ DB Error: {e}")
             return
 
-        await update.message.reply_text(f"✅ Character uploaded!\nID: {new_id}\nName: {name}")
+        await update.message.reply_text(
+            f"✅ Uploaded!\nID: {new_id}\nName: {name}"
+        )
         return
 
-    # ===== Pipe args =====
+
+    # ================= PIPE MODE =================
     parts = [p.strip() for p in args_text.split("|")]
+
     if len(parts) != 5:
-        await update.message.reply_text("Usage: /upload Name|Rarity|Faction|Power|Price")
+        await update.message.reply_text(
+            "Usage: /upload Name|Rarity|Faction|Power|Price"
+        )
         return
 
     try:
@@ -439,22 +485,37 @@ async def upload_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         power = int(power)
         price = int(price)
     except:
-        await update.message.reply_text("Power/Price must be integers")
+        await update.message.reply_text("Power / Price must be numbers")
         return
 
+
+    # Warning if name exists
+    c.execute("SELECT id FROM characters WHERE name=?", (name,))
+    if c.fetchone():
+        await update.message.reply_text("⚠ Name already exists (Allowed)")
+
+
     file_id = photo_msg.photo[-1].file_id
+
     try:
         c.execute("""
-        INSERT INTO characters (name, rarity, faction, power, price, file_id)
-        VALUES (?,?,?,?,?,?)
+            INSERT INTO characters
+            (name, rarity, faction, power, price, file_id)
+            VALUES (?,?,?,?,?,?)
         """, (name, rarity, faction, power, price, file_id))
+
         conn.commit()
         new_id = c.lastrowid
+
     except Exception as e:
         await update.message.reply_text(f"❌ DB Error: {e}")
         return
 
-    await update.message.reply_text(f"✅ Character uploaded!\nID: {new_id}\nName: {name}")
+
+    await update.message.reply_text(
+        f"✅ Uploaded!\nID: {new_id}\nName: {name}"
+    )
+
 # ================= TOPS LEADERBOARD ================
 async def get_user_name(bot, user_id: int) -> str:
     try:
