@@ -73,7 +73,8 @@ if not os.path.exists(DATA_DIR):
 conn = sqlite3.connect(
     DB_FILE,
     check_same_thread=False,
-    timeout=30
+    timeout=30,
+    isolation_level=None
 )
 c = conn.cursor()
 
