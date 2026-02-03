@@ -14,6 +14,8 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+from dotenv import load_dotenv
+load_dotenv()
 
 # ================= KEEP ALIVE =================
 from flask import Flask
