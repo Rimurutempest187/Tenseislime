@@ -1,4 +1,4 @@
-import os
+`````````````````````````````import os
 import random
 import sqlite3
 import logging
@@ -455,25 +455,60 @@ async def upload_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(f"✅ Character uploaded!\nID: {new_id}\nName: {name}")
-# ================= TOPS LEADERBOARD =================
+# ================= TOPS LEADERBOARD ================
+async def get_user_name(bot, user_id: int) -> str:
+    try:
+        user = await bot.get_chat(user_id)
+
+        if user.username:
+            return "@" + user.username
+
+        if user.first_name:
+            return user.first_name
+
+        return str(user_id)
+
+    except:
+        return str(user_id)
+
 
 async def tops_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     c.execute("""
-    SELECT id, level, exp, coins FROM users
+    SELECT id, level, exp, coins
+    FROM users
     ORDER BY level DESC, exp DESC, coins DESC
     LIMIT 10
     """)
     rows = c.fetchall()
+
     if not rows:
-        await update.message.reply_text("⚠ No users found")
+        await update.message.reply_text("⚠ User မရှိသေးပါ")
         return
 
-    text = "🏆 Top Players\n\n"
-    for idx, row in enumerate(rows, 1):
-        uid, lvl, exp, coins = row
-        text += f"{idx}. User: {uid} | Level: {lvl} | Coins: {coins}\n"
 
-    await update.message.reply_text(text)
+    text = "🏆 <b>Top Players Ranking</b>\n\n"
+
+    for idx, row in enumerate(rows, 1):
+
+        uid, lvl, exp, coins = row
+
+        # get name
+        name = await get_user_name(context.bot, uid)
+
+        text += (
+            f"🥇 {idx}. {name}\n"
+            f"   🎚 Level: {lvl}\n"
+            f"   💰 Coins: {coins}\n"
+            f"   📊 EXP: {exp}\n\n"
+        )
+
+
+    await update.message.reply_text(
+        text,
+        parse_mode="HTML"
+    )
+
 
 
 # ================= ADMIN COMMANDS =================
