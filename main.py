@@ -4,6 +4,7 @@ import random
 import sqlite3
 import logging
 import time
+import asyncio
 from threading import Thread
 from typing import Optional, List, Tuple, Any
 
@@ -29,7 +30,7 @@ def home():
     return "Bot Alive!"
 
 def run_web():
-    # Use threaded=False (Flask default) is fine; keep thread as daemon
+    # Flask runs in background thread on port from env or 8080
     app_web.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
 
 def keep_alive():
@@ -73,9 +74,9 @@ logger = logging.getLogger(__name__)
 if not os.path.exists(DATA_DIR):
     os.makedirs(DATA_DIR)
 
-# Use check_same_thread=False so handlers from different threads can access DB.
 conn = sqlite3.connect(DB_FILE, check_same_thread=False, timeout=30, isolation_level=None)
-# Set WAL mode for concurrency
+
+# Improve concurrency
 try:
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
@@ -87,10 +88,9 @@ def safe_execute(query: str, params: Tuple = (), fetchone: bool = False,
                  fetchall: bool = False, commit: bool = False):
     """
     Safe wrapper around sqlite operations.
-    Returns:
-      - fetchone: single row or None
-      - fetchall: list of rows or []
-      - else: cursor or None
+    - fetchone=True -> returns single row or None
+    - fetchall=True -> returns list of rows or []
+    - else -> returns cursor or None
     """
     try:
         cur = conn.cursor()
@@ -102,7 +102,7 @@ def safe_execute(query: str, params: Tuple = (), fetchone: bool = False,
         if fetchall:
             return cur.fetchall()
         return cur
-    except Exception as e:
+    except Exception:
         logger.exception("DB error executing query: %s | params=%s", query, params)
         return None
 
@@ -146,6 +146,22 @@ CREATE TABLE IF NOT EXISTS admins(
 """, commit=True)
 
 
+# Ensure column exists utility (for altering safely)
+def ensure_column(table: str, column: str, col_def: str):
+    try:
+        rows = safe_execute(f"PRAGMA table_info({table})", fetchall=True) or []
+        cols = [r[1] for r in rows]
+        if column not in cols:
+            safe_execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_def}", commit=True)
+    except Exception:
+        # if alteration fails, log and continue
+        logger.exception("Failed to ensure column %s on %s", column, table)
+
+
+# Add last_battle column if missing
+ensure_column("users", "last_battle", "INTEGER DEFAULT 0")
+
+
 # ================= HELPERS =================
 def is_owner(uid: int) -> bool:
     return uid == OWNER_ID
@@ -157,13 +173,12 @@ def is_admin(uid: int) -> bool:
     return bool(r)
 
 def init_user(uid: int):
-    if safe_execute("SELECT 1 FROM users WHERE id=?", (uid,), fetchone=True) is None:
-        # If DB error returned None, still try insert to ensure user exists.
-        try:
-            safe_execute("INSERT OR IGNORE INTO users(id, coins, level, exp, last_daily) VALUES(?,?,?,?,?)",
-                         (uid, START_COINS, 1, 0, 0), commit=True)
-        except Exception:
-            logger.exception("Failed to init user %s", uid)
+    # create user with defaults if not exists
+    try:
+        safe_execute("INSERT OR IGNORE INTO users(id, coins, level, exp, last_daily, last_battle) VALUES(?,?,?,?,?,?)",
+                     (uid, START_COINS, 1, 0, 0, 0), commit=True)
+    except Exception:
+        logger.exception("Failed to init user %s", uid)
 
 def roll_rarity() -> str:
     r = random.randint(1, 100)
@@ -208,6 +223,59 @@ def format_char(row: Tuple[Any, ...]) -> str:
         f"💰 Price: {row[5]}"
     )
 
+# ----------------- New helper: total power -----------------
+def get_total_power(uid: int) -> int:
+    rows = safe_execute("""
+    SELECT characters.power, inventory.count
+    FROM inventory
+    JOIN characters ON inventory.char_id = characters.id
+    WHERE inventory.user_id=?
+    """, (uid,), fetchall=True) or []
+    total = 0
+    for power, count in rows:
+        try:
+            total += int(power) * int(count)
+        except Exception:
+            continue
+    return total
+
+# ================= SUMMON ANIMATION =================
+async def summon_animation(msg):
+    frames = [
+        "🎰 Summoning...",
+        "✨ Charging Mana...",
+        "🌌 Opening Portal...",
+        "⚡ Power Rising...",
+        "💥 Breaking Seal...",
+        "🌟 Revealing..."
+    ]
+    for f in frames:
+        try:
+            await msg.edit_text(f)
+        except Exception:
+            pass
+        await asyncio.sleep(1)
+
+
+# ================= BATTLE ANIMATION =================
+async def battle_animation(msg, me, enemy):
+    frames = [
+        f"⚔ {me}  VS  {enemy}\n\n🔥 Preparing...",
+        f"⚔ {me}  VS  {enemy}\n\n3️⃣ Ready...",
+        f"⚔ {me}  VS  {enemy}\n\n2️⃣ Ready...",
+        f"⚔ {me}  VS  {enemy}\n\n1️⃣ Ready...",
+        f"💥 BATTLE START 💥\n\n{me} ➡ ⚔ ➡ {enemy}",
+        f"💢 {enemy} Counter Attack!",
+        f"🔥 Massive Damage!",
+        f"⚡ Final Hit..."
+    ]
+    for f in frames:
+        try:
+            await msg.edit_text(f)
+        except Exception:
+            pass
+        await asyncio.sleep(1.2)
+
 
 # ================= BASIC COMMANDS =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -224,6 +292,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/daily - Daily Reward\n"
         "/balance - Coins\n"
         "/tops - Ranking\n"
+        "/battle <user_id> - PvP Battle\n"
     )
     await update.message.reply_text(text)
 
@@ -270,8 +339,8 @@ async def daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ +{DAILY_REWARD} coins")
 
 
-# ================= SUMMON =================
-def choose_chars(n: int) -> List[Tuple]:
+# ================= SUMMON (ANIMATED) =================
+async def choose_chars(n: int) -> List[Tuple]:
     rows = safe_execute("SELECT * FROM characters", fetchall=True)
     if not rows:
         return []
@@ -284,49 +353,93 @@ def choose_chars(n: int) -> List[Tuple]:
 
 
 async def summon(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     uid = update.effective_user.id
     init_user(uid)
+
     r = safe_execute("SELECT coins FROM users WHERE id=?", (uid,), fetchone=True)
     coins = r[0] if r else 0
+
     if coins < SUMMON_COST:
         await update.message.reply_text("❌ Coins မလုံလောက်ပါ")
         return
+
+    # deduct
     safe_execute("UPDATE users SET coins=coins-? WHERE id=?", (SUMMON_COST, uid), commit=True)
-    chars = choose_chars(1)
+
+    # start animation
+    msg = await update.message.reply_text("🎰 Summon Initializing...")
+
+    await summon_animation(msg)
+
+    # roll (choose_chars is async here)
+    chars = await choose_chars(1)
+
     if not chars:
-        await update.message.reply_text("⚠ No chars available")
+        await msg.edit_text("⚠ No Character Found")
         return
+
     ch = chars[0]
+
     add_inventory(uid, ch[0])
     add_exp(uid, 10)
-    # file_id expected to be Telegram file_id (photo)
+
+    # reveal
+    caption = (
+        "🌟 SUMMON RESULT 🌟\n\n"
+        f"{format_char(ch)}"
+    )
+
     try:
-        await update.message.reply_photo(ch[6], caption=format_char(ch))
+        # try to send as photo, then delete the animation starter
+        await context.bot.send_photo(
+            chat_id=update.effective_chat.id,
+            photo=ch[6],
+            caption=caption
+        )
+        try:
+            await msg.delete()
+        except Exception:
+            pass
     except Exception:
-        # fallback to text if sending photo failed
-        await update.message.reply_text(format_char(ch))
+        await msg.edit_text(caption)
 
 
 async def summon10(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     uid = update.effective_user.id
     init_user(uid)
+
     r = safe_execute("SELECT coins FROM users WHERE id=?", (uid,), fetchone=True)
     coins = r[0] if r else 0
+
     if coins < TEN_SUMMON_COST:
         await update.message.reply_text("❌ Coins မလုံလောက်ပါ")
         return
+
     safe_execute("UPDATE users SET coins=coins-? WHERE id=?", (TEN_SUMMON_COST, uid), commit=True)
-    res = choose_chars(10)
-    text = "🎰 10x Summon\n\n"
+
+    msg = await update.message.reply_text("🎰 10x Summon Initializing...")
+    await summon_animation(msg)
+
+    res = await choose_chars(10)
+
+    text = "🌟 10x SUMMON RESULT 🌟\n\n"
     count = {}
+
     for ch in res:
         add_inventory(uid, ch[0])
         add_exp(uid, 10)
-        key = ch[1]
+        key = f"{ch[1]} ({ch[2]})"
         count[key] = count.get(key, 0) + 1
+
     for k, v in count.items():
         text += f"{k} x{v}\n"
-    await update.message.reply_text(text)
+
+    try:
+        await msg.edit_text(text)
+    except Exception:
+        await update.message.reply_text(text)
 
 
 # ================= STORE =================
@@ -344,7 +457,6 @@ async def send_store(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_photo(chat_id, char[6], caption=format_char(char),
                                      reply_markup=InlineKeyboardMarkup(keyboard))
     except Exception:
-        # fallback to message if photo fails
         await context.bot.send_message(chat_id, format_char(char), reply_markup=InlineKeyboardMarkup(keyboard))
 
 
@@ -527,7 +639,6 @@ async def upload_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 new_id = cur.lastrowid
             except Exception:
-                # fallback: get by name
                 row = safe_execute("SELECT id FROM characters WHERE name=? ORDER BY id DESC LIMIT 1", (name,), fetchone=True)
                 new_id = row[0] if row else None
 
@@ -582,9 +693,9 @@ async def upload_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def get_user_name(bot, user_id: int) -> str:
     try:
         user = await bot.get_chat(user_id)
-        if user.username:
+        if getattr(user, "username", None):
             return "@" + user.username
-        if user.first_name:
+        if getattr(user, "first_name", None):
             return user.first_name
         return str(user_id)
     except Exception:
@@ -686,6 +797,98 @@ async def gift_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ Gift sent!")
 
 
+# ================= BATTLE (ANIMATED) =================
+BATTLE_CD = 600  # 10 minutes cooldown
+
+async def battle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    uid = update.effective_user.id
+    init_user(uid)
+
+    if len(context.args) != 1:
+        await update.message.reply_text("Usage: /battle <user_id>")
+        return
+
+    try:
+        enemy_id = int(context.args[0])
+    except Exception:
+        await update.message.reply_text("User ID မမှန်ပါ")
+        return
+
+    if enemy_id == uid:
+        await update.message.reply_text("ကိုယ့်ကိုယ်ကို မတိုက်နိုင်ပါ")
+        return
+
+    init_user(enemy_id)
+
+    now = int(time.time())
+
+    row = safe_execute("SELECT last_battle FROM users WHERE id=?", (uid,), fetchone=True)
+    last = row[0] if row else 0
+
+    if now - last < BATTLE_CD:
+        left = BATTLE_CD - (now-last)
+        await update.message.reply_text(f"⏱ {left//60} မိနစ်နောက်မှ ပြန်တိုက်ပါ")
+        return
+
+    my_power = get_total_power(uid)
+    enemy_power = get_total_power(enemy_id)
+
+    if my_power == 0 or enemy_power == 0:
+        await update.message.reply_text("⚠ Character မရှိရင် မတိုက်နိုင်ပါ")
+        return
+
+    me_name = update.effective_user.first_name or str(uid)
+    enemy_name = await get_user_name(context.bot, enemy_id)
+
+    # start msg for animation
+    try:
+        msg = await update.message.reply_text("⚔ Battle Initializing...")
+    except Exception:
+        msg = None
+
+    if msg:
+        await battle_animation(msg, me_name, enemy_name)
+
+    # determine winner
+    if my_power > enemy_power:
+        winner = uid
+        loser = enemy_id
+        win_name = me_name
+    elif my_power < enemy_power:
+        winner = enemy_id
+        loser = uid
+        win_name = enemy_name
+    else:
+        if msg:
+            await msg.edit_text("🤝 Draw! No Winner")
+        else:
+            await update.message.reply_text("🤝 Draw! No Winner")
+        return
+
+    reward = random.randint(80, 150)
+
+    safe_execute("UPDATE users SET coins=coins+?, last_battle=? WHERE id=?", (reward, now, winner), commit=True)
+    safe_execute("UPDATE users SET last_battle=? WHERE id=?", (now, loser), commit=True)
+
+    add_exp(winner, 40)
+    add_exp(loser, 15)
+
+    final_text = (
+        f"🏆 BATTLE RESULT 🏆\n\n"
+        f"🔥 {me_name}: {my_power}\n"
+        f"💀 {enemy_name}: {enemy_power}\n\n"
+        f"👑 Winner: {win_name}\n"
+        f"💰 +{reward} Coins\n"
+        f"⭐ +40 EXP"
+    )
+
+    if msg:
+        await msg.edit_text(final_text)
+    else:
+        await update.message.reply_text(final_text)
+
+
 # ================= MAIN =================
 def main():
     keep_alive()
@@ -700,7 +903,7 @@ def main():
     app.add_handler(CommandHandler("profile", profile))
     app.add_handler(CommandHandler("daily", daily))
 
-    # Summon
+    # Summon (animated)
     app.add_handler(CommandHandler("summon", summon))
     app.add_handler(CommandHandler("summon10", summon10))
 
@@ -725,9 +928,9 @@ def main():
     # Gift
     app.add_handler(CommandHandler("gift", gift_cmd))
 
-    # Optionally handle photos/attachments for upload convenience:
-    # If admin replies photo with /upload command, upload_cmd already handles reply_to_message.
-    # But we can also accept photo messages from admins and prompt for metadata.
+    # Battle
+    app.add_handler(CommandHandler("battle", battle_cmd))
+
     logger.info("Bot started")
     app.run_polling(drop_pending_updates=True)
 
