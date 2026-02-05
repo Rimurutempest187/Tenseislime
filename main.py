@@ -6,7 +6,7 @@ import logging
 import time
 import asyncio
 from threading import Thread
-from typing import Optional, List, Tuple, Any
+from typing import List, Tuple, Any
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -30,7 +30,6 @@ def home():
     return "Bot Alive!"
 
 def run_web():
-    # Flask runs in background thread on port from env or 8080
     app_web.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
 
 def keep_alive():
@@ -40,7 +39,7 @@ def keep_alive():
 
 # ================= CONFIG =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-OWNER_ID = int(os.getenv("OWNER_ID", "1812962224"))  # change if needed
+OWNER_ID = int(os.getenv("OWNER_ID", "1812962224"))
 
 DATA_DIR = "data"
 DB_FILE = f"{DATA_DIR}/bot.db"
@@ -76,7 +75,6 @@ if not os.path.exists(DATA_DIR):
 
 conn = sqlite3.connect(DB_FILE, check_same_thread=False, timeout=30, isolation_level=None)
 
-# Improve concurrency
 try:
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
@@ -86,12 +84,6 @@ except Exception:
 
 def safe_execute(query: str, params: Tuple = (), fetchone: bool = False,
                  fetchall: bool = False, commit: bool = False):
-    """
-    Safe wrapper around sqlite operations.
-    - fetchone=True -> returns single row or None
-    - fetchall=True -> returns list of rows or []
-    - else -> returns cursor or None
-    """
     try:
         cur = conn.cursor()
         cur.execute(query, params)
@@ -146,7 +138,6 @@ CREATE TABLE IF NOT EXISTS admins(
 """, commit=True)
 
 
-# Ensure column exists utility (for altering safely)
 def ensure_column(table: str, column: str, col_def: str):
     try:
         rows = safe_execute(f"PRAGMA table_info({table})", fetchall=True) or []
@@ -154,11 +145,9 @@ def ensure_column(table: str, column: str, col_def: str):
         if column not in cols:
             safe_execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_def}", commit=True)
     except Exception:
-        # if alteration fails, log and continue
         logger.exception("Failed to ensure column %s on %s", column, table)
 
-
-# Add last_battle column if missing
+# add last_battle column if missing
 ensure_column("users", "last_battle", "INTEGER DEFAULT 0")
 
 
@@ -173,7 +162,6 @@ def is_admin(uid: int) -> bool:
     return bool(r)
 
 def init_user(uid: int):
-    # create user with defaults if not exists
     try:
         safe_execute("INSERT OR IGNORE INTO users(id, coins, level, exp, last_daily, last_battle) VALUES(?,?,?,?,?,?)",
                      (uid, START_COINS, 1, 0, 0, 0), commit=True)
@@ -223,7 +211,6 @@ def format_char(row: Tuple[Any, ...]) -> str:
         f"💰 Price: {row[5]}"
     )
 
-# ----------------- New helper: total power -----------------
 def get_total_power(uid: int) -> int:
     rows = safe_execute("""
     SELECT characters.power, inventory.count
@@ -239,7 +226,8 @@ def get_total_power(uid: int) -> int:
             continue
     return total
 
-# ================= SUMMON ANIMATION =================
+
+# ================= ANIMATIONS =================
 async def summon_animation(msg):
     frames = [
         "🎰 Summoning...",
@@ -257,7 +245,6 @@ async def summon_animation(msg):
         await asyncio.sleep(1)
 
 
-# ================= BATTLE ANIMATION =================
 async def battle_animation(msg, me, enemy):
     frames = [
         f"⚔ {me}  VS  {enemy}\n\n🔥 Preparing...",
@@ -292,7 +279,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/daily - Daily Reward\n"
         "/balance - Coins\n"
         "/tops - Ranking\n"
-        "/battle <user_id> - PvP Battle\n"
+        "/battle - Reply to a user's message to challenge\n"
+        "/gift - Reply to a user's message to send character (/gift <char_id> <count>)\n"
+        "/addcoins - Admin reply to user to give coins (/addcoins <amount>)\n"
     )
     await update.message.reply_text(text)
 
@@ -340,7 +329,7 @@ async def daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ================= SUMMON (ANIMATED) =================
-async def choose_chars(n: int) -> List[Tuple]:
+def choose_chars_sync(n: int) -> List[Tuple]:
     rows = safe_execute("SELECT * FROM characters", fetchall=True)
     if not rows:
         return []
@@ -351,9 +340,11 @@ async def choose_chars(n: int) -> List[Tuple]:
         res.append(random.choice(pool))
     return res
 
+async def choose_chars(n: int) -> List[Tuple]:
+    return choose_chars_sync(n)
+
 
 async def summon(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
     uid = update.effective_user.id
     init_user(uid)
 
@@ -364,39 +355,27 @@ async def summon(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Coins မလုံလောက်ပါ")
         return
 
-    # deduct
     safe_execute("UPDATE users SET coins=coins-? WHERE id=?", (SUMMON_COST, uid), commit=True)
 
-    # start animation
     msg = await update.message.reply_text("🎰 Summon Initializing...")
-
     await summon_animation(msg)
 
-    # roll (choose_chars is async here)
     chars = await choose_chars(1)
-
     if not chars:
         await msg.edit_text("⚠ No Character Found")
         return
 
     ch = chars[0]
-
     add_inventory(uid, ch[0])
     add_exp(uid, 10)
 
-    # reveal
     caption = (
         "🌟 SUMMON RESULT 🌟\n\n"
         f"{format_char(ch)}"
     )
 
     try:
-        # try to send as photo, then delete the animation starter
-        await context.bot.send_photo(
-            chat_id=update.effective_chat.id,
-            photo=ch[6],
-            caption=caption
-        )
+        await context.bot.send_photo(chat_id=update.effective_chat.id, photo=ch[6], caption=caption)
         try:
             await msg.delete()
         except Exception:
@@ -406,7 +385,6 @@ async def summon(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def summon10(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
     uid = update.effective_user.id
     init_user(uid)
 
@@ -423,16 +401,13 @@ async def summon10(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await summon_animation(msg)
 
     res = await choose_chars(10)
-
     text = "🌟 10x SUMMON RESULT 🌟\n\n"
     count = {}
-
     for ch in res:
         add_inventory(uid, ch[0])
         add_exp(uid, 10)
         key = f"{ch[1]} ({ch[2]})"
         count[key] = count.get(key, 0) + 1
-
     for k, v in count.items():
         text += f"{k} x{v}\n"
 
@@ -470,7 +445,6 @@ async def store_btn(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = q.from_user.id
     init_user(uid)
 
-    # NEXT
     if q.data == "next_store":
         try:
             await q.message.delete()
@@ -479,22 +453,17 @@ async def store_btn(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_store(q.message.chat.id, context)
         return
 
-    # BUY
     if q.data.startswith("buy_"):
         cid = int(q.data.split("_")[1])
-
         char = safe_execute("SELECT * FROM characters WHERE id=?", (cid,), fetchone=True)
         if not char:
             await q.edit_message_caption("❌ Character not found")
             return
-
         r = safe_execute("SELECT coins FROM users WHERE id=?", (uid,), fetchone=True)
         coins = r[0] if r else 0
-
         if coins < char[5]:
             await q.edit_message_caption("❌ Not enough coins")
             return
-
         safe_execute("UPDATE users SET coins=coins-? WHERE id=?", (char[5], uid), commit=True)
         add_inventory(uid, cid)
         await q.edit_message_caption(f"✅ Bought {char[1]}")
@@ -570,7 +539,6 @@ async def upload_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠ Admin only")
         return
 
-    # ===== Get Photo =====
     photo_msg = None
 
     if update.message.photo:
@@ -583,10 +551,8 @@ async def upload_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📷 Send photo with /upload or reply to photo")
         return
 
-    # ===== Get Args =====
     args_text = " ".join(context.args).strip()
 
-    # ================= CAPTION MODE =================
     if not args_text:
         caption = update.message.caption or ""
         if not caption:
@@ -622,7 +588,6 @@ async def upload_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"Rarity must be one of: {', '.join(ALLOWED_RARITY)}")
             return
 
-        # Warning if name exists (allowed)
         if safe_execute("SELECT id FROM characters WHERE name=?", (name,), fetchone=True):
             await update.message.reply_text("⚠ Name already exists (Allowed)")
 
@@ -645,7 +610,6 @@ async def upload_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ Uploaded!\nID: {new_id}\nName: {name}")
         return
 
-    # ================= PIPE MODE =================
     parts = [p.strip() for p in args_text.split("|")]
 
     if len(parts) != 5:
@@ -666,7 +630,6 @@ async def upload_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Rarity must be one of: {', '.join(ALLOWED_RARITY)}")
         return
 
-    # Warning if name exists (Allowed)
     if safe_execute("SELECT id FROM characters WHERE name=?", (name,), fetchone=True):
         await update.message.reply_text("⚠ Name already exists (Allowed)")
 
@@ -730,25 +693,6 @@ async def tops_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ================= ADMIN COMMANDS =================
-async def addcoins_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    if not is_admin(uid):
-        await update.message.reply_text("⚠ Admin only")
-        return
-    if len(context.args) != 2:
-        await update.message.reply_text("Usage: /addcoins <user_id> <amount>")
-        return
-    try:
-        target_id = int(context.args[0])
-        amount = int(context.args[1])
-    except Exception:
-        await update.message.reply_text("Invalid user_id or amount")
-        return
-    init_user(target_id)
-    safe_execute("UPDATE users SET coins=coins+? WHERE id=?", (amount, target_id), commit=True)
-    await update.message.reply_text(f"✅ Added {amount} coins to {target_id}")
-
-
 async def addadmin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if not is_owner(uid):
@@ -770,49 +714,105 @@ async def addadmin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ {target_id} added as admin")
 
 
-# ================= GIFT (user -> user) =================
-async def gift_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    init_user(uid)
-    if len(context.args) != 2:
-        await update.message.reply_text("Usage: /gift <user_id> <amount>")
+# ================= ADD COINS (REPLY MODE) =================
+async def addcoins_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    admin = update.effective_user.id
+
+    if not is_admin(admin):
+        await update.message.reply_text("⚠ Admin only")
         return
-    try:
-        target = int(context.args[0])
-        amount = int(context.args[1])
-    except Exception:
-        await update.message.reply_text("Invalid format")
+
+    if not update.message.reply_to_message:
+        await update.message.reply_text("⚠ User ကို reply လုပ်ပြီး /addcoins <amount> လို့ရေးပါ")
         return
-    if amount <= 0:
-        await update.message.reply_text("Amount must be positive")
-        return
-    r = safe_execute("SELECT coins FROM users WHERE id=?", (uid,), fetchone=True)
-    coins = r[0] if r else 0
-    if coins < amount:
-        await update.message.reply_text("❌ Coins မလုံလောက်ပါ")
-        return
+
+    target = update.message.reply_to_message.from_user.id
     init_user(target)
-    safe_execute("UPDATE users SET coins=coins-? WHERE id=?", (amount, uid), commit=True)
-    safe_execute("UPDATE users SET coins=coins+? WHERE id=?", (amount, target), commit=True)
-    await update.message.reply_text("✅ Gift sent!")
-
-
-# ================= BATTLE (ANIMATED) =================
-BATTLE_CD = 600  # 10 minutes cooldown
-
-async def battle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    uid = update.effective_user.id
-    init_user(uid)
 
     if len(context.args) != 1:
-        await update.message.reply_text("Usage: /battle <user_id>")
+        await update.message.reply_text("Usage: /addcoins <amount>")
         return
 
     try:
-        enemy_id = int(context.args[0])
+        amount = int(context.args[0])
     except Exception:
-        await update.message.reply_text("User ID မမှန်ပါ")
+        await update.message.reply_text("❌ Amount မမှန်ပါ")
+        return
+
+    if amount <= 0:
+        await update.message.reply_text("❌ Amount must be > 0")
+        return
+
+    safe_execute("UPDATE users SET coins = coins + ? WHERE id=?", (amount, target), commit=True)
+    await update.message.reply_text(f"✅ Added {amount} coins to {update.message.reply_to_message.from_user.first_name}")
+
+
+# ================= GIFT CHARACTER (REPLY MODE) =================
+async def gift_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    sender = update.effective_user.id
+    init_user(sender)
+
+    if not update.message.reply_to_message:
+        await update.message.reply_text("⚠ Character ပို့ချင်ရင် User ရဲ့ message ကို reply လုပ်ပြီး\n/gift <char_id> <count> လို့ရေးပါ")
+        return
+
+    receiver = update.message.reply_to_message.from_user.id
+    init_user(receiver)
+
+    if len(context.args) != 2:
+        await update.message.reply_text("Usage: /gift <char_id> <count>")
+        return
+
+    try:
+        char_id = int(context.args[0])
+        count = int(context.args[1])
+    except Exception:
+        await update.message.reply_text("❌ ID / Count မမှန်ပါ")
+        return
+
+    if count <= 0:
+        await update.message.reply_text("❌ Count must be > 0")
+        return
+
+    row = safe_execute("SELECT count FROM inventory WHERE user_id=? AND char_id=?", (sender, char_id), fetchone=True)
+    if not row or row[0] < count:
+        await update.message.reply_text("❌ Character မလုံလောက်ပါ")
+        return
+
+    ch = safe_execute("SELECT name, rarity FROM characters WHERE id=?", (char_id,), fetchone=True)
+    if not ch:
+        await update.message.reply_text("❌ Character ID မရှိပါ")
+        return
+
+    name, rarity = ch
+
+    safe_execute("UPDATE inventory SET count = count - ? WHERE user_id=? AND char_id=?", (count, sender, char_id), commit=True)
+    add_inventory(receiver, char_id, count)
+    safe_execute("DELETE FROM inventory WHERE user_id=? AND char_id=? AND count<=0", (sender, char_id), commit=True)
+
+    await update.message.reply_text(
+        f"🎁 Gift Success!\n\n📦 {name} ({rarity}) x{count}\n➡ Sent to {update.message.reply_to_message.from_user.first_name}"
+    )
+
+
+# ================= BATTLE (REPLY MODE) =================
+BATTLE_CD = 600  # 10 minutes
+
+async def battle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    init_user(uid)
+
+    enemy_id = None
+    if update.message.reply_to_message and update.message.reply_to_message.from_user:
+        enemy_id = update.message.reply_to_message.from_user.id
+    elif context.args:
+        try:
+            enemy_id = int(context.args[0])
+        except Exception:
+            enemy_id = None
+
+    if not enemy_id:
+        await update.message.reply_text("မှားနေသည် — တိုက်ချင်သူ၏ message ကို reply လုပ်ပြီး `/battle` လို့ပို့ပါ။")
         return
 
     if enemy_id == uid:
@@ -822,26 +822,29 @@ async def battle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     init_user(enemy_id)
 
     now = int(time.time())
-
     row = safe_execute("SELECT last_battle FROM users WHERE id=?", (uid,), fetchone=True)
     last = row[0] if row else 0
-
     if now - last < BATTLE_CD:
         left = BATTLE_CD - (now-last)
         await update.message.reply_text(f"⏱ {left//60} မိနစ်နောက်မှ ပြန်တိုက်ပါ")
+        return
+
+    row2 = safe_execute("SELECT last_battle FROM users WHERE id=?", (enemy_id,), fetchone=True)
+    enemy_last = row2[0] if row2 else 0
+    if now - enemy_last < 10:
+        await update.message.reply_text("Opponent is busy, try again a bit later.")
         return
 
     my_power = get_total_power(uid)
     enemy_power = get_total_power(enemy_id)
 
     if my_power == 0 or enemy_power == 0:
-        await update.message.reply_text("⚠ Character မရှိရင် မတိုက်နိုင်ပါ")
+        await update.message.reply_text("⚠ တိုက်ရန် characters မရှိသေးပါ")
         return
 
     me_name = update.effective_user.first_name or str(uid)
     enemy_name = await get_user_name(context.bot, enemy_id)
 
-    # start msg for animation
     try:
         msg = await update.message.reply_text("⚔ Battle Initializing...")
     except Exception:
@@ -850,7 +853,6 @@ async def battle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if msg:
         await battle_animation(msg, me_name, enemy_name)
 
-    # determine winner
     if my_power > enemy_power:
         winner = uid
         loser = enemy_id
@@ -860,11 +862,9 @@ async def battle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         loser = uid
         win_name = enemy_name
     else:
-        if msg:
-            await msg.edit_text("🤝 Draw! No Winner")
-        else:
-            await update.message.reply_text("🤝 Draw! No Winner")
-        return
+        winner = random.choice([uid, enemy_id])
+        loser = enemy_id if winner == uid else uid
+        win_name = me_name if winner == uid else enemy_name
 
     reward = random.randint(80, 150)
 
@@ -903,12 +903,12 @@ def main():
     app.add_handler(CommandHandler("profile", profile))
     app.add_handler(CommandHandler("daily", daily))
 
-    # Summon (animated)
+    # Summon
     app.add_handler(CommandHandler("summon", summon))
     app.add_handler(CommandHandler("summon10", summon10))
 
     # Store
-    app.add_handler(CommandHandler("store", store_cmd))
+    app.add_handler(CommandHandler("store", send_store))
     app.add_handler(CallbackQueryHandler(store_btn, pattern=r'^(buy_\d+|next_store)$'))
 
     # Inventory
@@ -922,14 +922,14 @@ def main():
     app.add_handler(CommandHandler("tops", tops_cmd))
 
     # Admin Commands
-    app.add_handler(CommandHandler("addcoins", addcoins_cmd))
     app.add_handler(CommandHandler("addadmin", addadmin_cmd))
+    app.add_handler(CommandHandler("addcoins", addcoins_cmd))  # reply mode
+    app.add_handler(CommandHandler("gift", gift_cmd))          # reply mode
 
-    # Gift
+    # Gift & Battle & Others
     app.add_handler(CommandHandler("gift", gift_cmd))
-
-    # Battle
     app.add_handler(CommandHandler("battle", battle_cmd))
+    app.add_handler(CommandHandler("addcoins", addcoins_cmd))
 
     logger.info("Bot started")
     app.run_polling(drop_pending_updates=True)
