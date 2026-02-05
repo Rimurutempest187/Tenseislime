@@ -1,5 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""
+Tensura World — main.py
+Features:
+ - Admin system (/addadmin /removeadmin /admins)
+ - Logging (console + file)
+ - Backup (auto + /backup /backups /restore)
+ - Rarity (gacha/drop rates)
+ - Level & EXP system
+ - Quest system (create/claim/list)
+ - Store, Summon, Inventory, Battle, Upload (from previous base)
+Language: Burmese messages
+"""
+
 import os
 import random
 import sqlite3
@@ -7,6 +20,7 @@ import logging
 import time
 import asyncio
 import shutil
+import sys
 from threading import Thread
 from typing import List, Tuple, Any, Optional
 
@@ -40,20 +54,29 @@ TEN_SUMMON_COST = int(os.getenv("TEN_SUMMON_COST", "500"))
 
 INV_PAGE = int(os.getenv("INV_PAGE", "8"))
 
+# Rarity rates (percent)
 RARITY_RATE = {
-    "Common": 55,
+    "Common": 50,
     "Rare": 25,
     "Epic": 15,
-    "Legendary": 5
+    "Legendary": 8,
+    "Mythic": 2
 }
 ALLOWED_RARITY = list(RARITY_RATE.keys())
 
 BATTLE_CD = 600  # seconds (10 minutes)
 
 # ===================== LOGGING =====================
+LOG_FILE = os.path.join(DATA_DIR, "bot.log")
+if not os.path.exists(DATA_DIR):
+    os.makedirs(DATA_DIR)
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(LOG_FILE, encoding="utf-8")
+    ]
 )
 logger = logging.getLogger(__name__)
 
@@ -72,6 +95,7 @@ except Exception:
 
 def safe_execute(query: str, params: Tuple = (), fetchone: bool = False,
                  fetchall: bool = False, commit: bool = False):
+    """Wrapper DB execute with logging and safe failure."""
     try:
         cur = conn.cursor()
         cur.execute(query, params)
@@ -86,18 +110,20 @@ def safe_execute(query: str, params: Tuple = (), fetchone: bool = False,
         logger.exception("❌ DB error: %s | params=%s", query, params)
         return None
 
-# ===================== SCHEMA =====================
+# ===================== SCHEMA (migrations safe) =====================
+# users
 safe_execute("""
 CREATE TABLE IF NOT EXISTS users(
     id INTEGER PRIMARY KEY,
-    coins INTEGER,
-    level INTEGER,
-    exp INTEGER,
-    last_daily INTEGER,
+    coins INTEGER DEFAULT 0,
+    level INTEGER DEFAULT 1,
+    exp INTEGER DEFAULT 0,
+    last_daily INTEGER DEFAULT 0,
     last_battle INTEGER DEFAULT 0
 )
 """, commit=True)
 
+# characters
 safe_execute("""
 CREATE TABLE IF NOT EXISTS characters(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -110,6 +136,7 @@ CREATE TABLE IF NOT EXISTS characters(
 )
 """, commit=True)
 
+# inventory
 safe_execute("""
 CREATE TABLE IF NOT EXISTS inventory(
     user_id INTEGER,
@@ -119,9 +146,31 @@ CREATE TABLE IF NOT EXISTS inventory(
 )
 """, commit=True)
 
+# admins
 safe_execute("""
 CREATE TABLE IF NOT EXISTS admins(
     user_id INTEGER PRIMARY KEY
+)
+""", commit=True)
+
+# quests
+safe_execute("""
+CREATE TABLE IF NOT EXISTS quests(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT,
+    reward_coins INTEGER DEFAULT 0,
+    reward_exp INTEGER DEFAULT 0,
+    description TEXT
+)
+""", commit=True)
+
+# user_quests (track claimed/completed)
+safe_execute("""
+CREATE TABLE IF NOT EXISTS user_quests(
+    user_id INTEGER,
+    quest_id INTEGER,
+    done INTEGER DEFAULT 0,
+    PRIMARY KEY(user_id, quest_id)
 )
 """, commit=True)
 
@@ -135,10 +184,10 @@ def backup_db() -> Optional[str]:
         with target:
             conn.backup(target)
         target.close()
-        logger.info(f"💾 Database backup အောင်မြင်စွာ သိမ်းပြီး: {backup_file}")
+        logger.info(f"💾 Database backup saved: {backup_file}")
         return backup_file
     except Exception:
-        logger.exception("❌ Database backup မအောင်မြင်ပါ")
+        logger.exception("❌ Database backup failed")
         return None
 
 def list_backups() -> List[str]:
@@ -146,7 +195,7 @@ def list_backups() -> List[str]:
     try:
         files = sorted([f for f in os.listdir(BACKUP_DIR) if f.startswith("bot_") and f.endswith(".db")])
     except Exception:
-        logger.exception("Backup listing အမှား")
+        logger.exception("Backup listing error")
     return files
 
 def restore_last_backup() -> bool:
@@ -155,25 +204,22 @@ def restore_last_backup() -> bool:
     try:
         backups = list_backups()
         if not backups:
-            logger.info("ℹ️ Restore: Backup file မရှိသေးပါ")
+            logger.info("ℹ️ Restore: No backup found")
             return False
         last = os.path.join(BACKUP_DIR, backups[-1])
         logger.info(f"♻️ Restoring from latest backup: {last}")
-        # Close existing connection
         try:
             conn.close()
         except Exception:
             pass
-        # Copy file over DB_FILE
         shutil.copy(last, DB_FILE)
-        # Reconnect
         conn = sqlite3.connect(DB_FILE, check_same_thread=False, timeout=30, isolation_level=None)
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA synchronous=NORMAL;")
-        logger.info(f"♻️ Database auto-restore ပြီးဆောင်ရွက်ခဲ့သည်: {last}")
+        logger.info(f"♻️ Database restored from: {last}")
         return True
     except Exception:
-        logger.exception("❌ Database auto-restore မအောင်မြင်ပါ")
+        logger.exception("❌ Database restore failed")
         return False
 
 def auto_backup(interval_sec: int = 3600):
@@ -181,7 +227,10 @@ def auto_backup(interval_sec: int = 3600):
     def loop():
         while True:
             time.sleep(interval_sec)
-            backup_db()
+            try:
+                backup_db()
+            except Exception:
+                logger.exception("Auto-backup failed loop")
     t = Thread(target=loop, daemon=True)
     t.start()
 
@@ -237,10 +286,13 @@ def add_exp(uid: int, amt: int = 0):
         return
     lvl, exp = row
     exp += amt
+    leveled = False
     while exp >= lvl * 100:
         exp -= lvl * 100
         lvl += 1
+        leveled = True
     safe_execute("UPDATE users SET level=?, exp=? WHERE id=?", (lvl, exp, uid), commit=True)
+    return leveled, lvl
 
 def format_char(row: Tuple[Any, ...]) -> str:
     return (
@@ -293,7 +345,7 @@ async def summon_animation(msg):
             await msg.edit_text(f)
         except Exception:
             pass
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.9)
 
 async def battle_animation(msg, me, enemy):
     frames = [
@@ -311,7 +363,7 @@ async def battle_animation(msg, me, enemy):
             await msg.edit_text(f)
         except Exception:
             pass
-        await asyncio.sleep(1.2)
+        await asyncio.sleep(1.0)
 
 # ===================== CHAR SELECTION (sync/async) =====================
 def choose_chars_sync(n: int) -> List[Tuple]:
@@ -328,7 +380,27 @@ def choose_chars_sync(n: int) -> List[Tuple]:
 async def choose_chars(n: int) -> List[Tuple]:
     return choose_chars_sync(n)
 
+# ================= SAFE EDIT =================
+async def safe_edit_message(msg, text):
+    """Safely edit a message: if it's a photo message, try edit_caption; otherwise try edit_text."""
+    try:
+        if getattr(msg, "photo", None):
+            try:
+                await msg.edit_caption(text)
+                return
+            except Exception:
+                pass
+        await msg.edit_text(text)
+        return
+    except Exception:
+        try:
+            await msg.reply_text(text)
+        except Exception:
+            logger.exception("Couldn't deliver message fallback.")
+
 # ===================== COMMANDS =====================
+
+# ---- Start ----
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     init_user(uid)
@@ -347,10 +419,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/gift - user message ကို reply လုပ်ပြီး /gift <char_id> <count>\n"
         "/addcoins - admin reply to user to give coins\n"
         "/upload - admin reply photo or send with args to upload character\n"
+        "/quest - Quest list\n"
+        "/claim <quest_id> - Claim quest\n"
         "/restore - Owner only: restore latest backup\n"
     )
     await update.message.reply_text(text)
 
+# ---- Balance/Profile ----
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     init_user(uid)
@@ -370,11 +445,13 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👤 Profile\n\n"
         f"🆔 ID: {uid}\n"
         f"🎚 Level: {lvl}\n"
-        f"📊 EXP: {exp}\n"
-        f"💰 Coins: {coins}"
+        f"📊 EXP: {exp}/{lvl*100}\n"
+        f"💰 Coins: {coins}\n"
+        f"🏋️ Total Power: {get_total_power(uid)}"
     )
     await update.message.reply_text(text)
 
+# ---- Daily ----
 async def daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     init_user(uid)
@@ -408,16 +485,26 @@ async def summon(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     ch = chars[0]
     add_inventory(uid, ch[0])
-    add_exp(uid, 10)
+    leveled, new_lvl = add_exp(uid, 10)
     caption = "🌟 SUMMON RESULT 🌟\n\n" + format_char(ch)
     try:
-        await context.bot.send_photo(chat_id=update.effective_chat.id, photo=ch[6], caption=caption)
-        try:
-            await msg.delete()
-        except Exception:
-            pass
+        if ch[6]:
+            await context.bot.send_photo(chat_id=update.effective_chat.id, photo=ch[6], caption=caption)
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+            if leveled:
+                await update.message.reply_text(f"🎉 Level up! အဆင့် {new_lvl} ဖြစ်လာပါသည်")
+            return
     except Exception:
+        logger.exception("send_photo failed in summon")
+    try:
         await msg.edit_text(caption)
+    except Exception:
+        await update.message.reply_text(caption)
+    if leveled:
+        await update.message.reply_text(f"🎉 Level up! အဆင့် {new_lvl} ဖြစ်လာပါသည်")
 
 # ---- Summon x10 ----
 async def summon10(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -434,9 +521,12 @@ async def summon10(update: Update, context: ContextTypes.DEFAULT_TYPE):
     res = await choose_chars(10)
     text = "🌟 10x SUMMON RESULT 🌟\n\n"
     count = {}
+    leveled_any = False
     for ch in res:
         add_inventory(uid, ch[0])
-        add_exp(uid, 10)
+        leveled, new_lvl = add_exp(uid, 10)
+        if leveled:
+            leveled_any = True
         key = f"{ch[1]} ({ch[2]})"
         count[key] = count.get(key, 0) + 1
     for k, v in count.items():
@@ -445,23 +535,31 @@ async def summon10(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(text)
     except Exception:
         await update.message.reply_text(text)
+    if leveled_any:
+        row = safe_execute("SELECT level FROM users WHERE id=?", (uid,), fetchone=True)
+        if row:
+            await update.message.reply_text(f"🎉 Level up! အဆင့် {row[0]} ဖြစ်လာပါသည်")
 
-# ================= STORE =================
+# ================= STORE (FIXED) =================
 async def send_store(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     chars = safe_execute("SELECT * FROM characters", fetchall=True)
     if not chars:
-        await context.bot.send_message(chat_id, "⚠ Store ဖိုင် ထဲ ဗလာပါ")
+        await context.bot.send_message(chat_id, "⚠ Store ထဲမှာ Character မရှိသေးပါ")
         return
     char = random.choice(chars)
     keyboard = [[
-        InlineKeyboardButton("Buy", callback_data=f"buy_{char[0]}"),
-        InlineKeyboardButton("Next", callback_data="next_store")
+        InlineKeyboardButton("🛒 Buy", callback_data=f"buy_{char[0]}"),
+        InlineKeyboardButton("➡ Next", callback_data="next_store")
     ]]
-    try:
-        await context.bot.send_photo(chat_id, char[6], caption=format_char(char),
-                                     reply_markup=InlineKeyboardMarkup(keyboard))
-    except Exception:
-        await context.bot.send_message(chat_id, format_char(char), reply_markup=InlineKeyboardMarkup(keyboard))
+    markup = InlineKeyboardMarkup(keyboard)
+    caption = format_char(char)
+    if char[6]:
+        try:
+            await context.bot.send_photo(chat_id=chat_id, photo=char[6], caption=caption, reply_markup=markup)
+            return
+        except Exception:
+            logger.exception("send_photo in store failed, fallback to text")
+    await context.bot.send_message(chat_id=chat_id, text=caption, reply_markup=markup)
 
 async def store_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_store(update.effective_chat.id, context)
@@ -471,33 +569,33 @@ async def store_btn(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     uid = q.from_user.id
     init_user(uid)
-    if q.data == "next_store":
+    data = q.data
+    msg = q.message
+    if data == "next_store":
         try:
-            await q.message.delete()
+            await msg.delete()
         except Exception:
             pass
-        await send_store(q.message.chat.id, context)
+        await send_store(msg.chat.id, context)
         return
-    if q.data.startswith("buy_"):
-        cid = int(q.data.split("_")[1])
+    if data.startswith("buy_"):
+        try:
+            cid = int(data.split("_")[1])
+        except Exception:
+            await q.answer("Invalid ID", show_alert=True)
+            return
         char = safe_execute("SELECT * FROM characters WHERE id=?", (cid,), fetchone=True)
         if not char:
-            await q.edit_message_caption("❌ Character မတွေ့ပါ")
+            await safe_edit_message(msg, "❌ Character မတွေ့ပါ")
             return
-        r = safe_execute("SELECT coins FROM users WHERE id=?", (uid,), fetchone=True)
-        coins = r[0] if r else 0
+        row = safe_execute("SELECT coins FROM users WHERE id=?", (uid,), fetchone=True)
+        coins = row[0] if row else 0
         if coins < char[5]:
-            await q.edit_message_caption("❌ Coins မလုံလောက်ပါ")
+            await safe_edit_message(msg, "❌ Coins မလုံလောက်ပါ")
             return
         safe_execute("UPDATE users SET coins=coins-? WHERE id=?", (char[5], uid), commit=True)
         add_inventory(uid, cid)
-        try:
-            await q.edit_message_caption(f"✅ Bought {char[1]}")
-        except Exception:
-            try:
-                await q.message.reply_text(f"✅ Bought {char[1]}")
-            except Exception:
-                pass
+        await safe_edit_message(msg, f"✅ Successfully Bought!\n\n📦 {char[1]} ({char[2]})")
 
 # ================= INVENTORY =================
 def build_inventory_pages(uid: int):
@@ -570,9 +668,8 @@ async def upload_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📷 /upload လုပ်ချင်ရင် photo တစ်ပုံပို့ပါ သို့မဟုတ် photo ကို reply လုပ်ပြီး /upload")
         return
     args_text = " ".join(context.args).strip()
-    # If args not provided, try to parse caption lines
     if not args_text:
-        caption = update.message.caption or update.message.reply_to_message.caption if update.message.reply_to_message else ""
+        caption = update.message.caption or (update.message.reply_to_message.caption if update.message.reply_to_message else "")
         if not caption:
             await update.message.reply_text("Usage: /upload Name|Rarity|Faction|Power|Price  OR attach caption lines (Name: X)")
             return
@@ -610,7 +707,6 @@ async def upload_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if rarity not in ALLOWED_RARITY:
         await update.message.reply_text(f"Rarity က {', '.join(ALLOWED_RARITY)} အထဲမှတစ်ခုဖြစ်ရမယ်")
         return
-    # allow duplicate names but warn (original code allowed)
     file_id = photo_msg.photo[-1].file_id
     cur = safe_execute("""
         INSERT INTO characters (name, rarity, faction, power, price, file_id)
@@ -648,11 +744,11 @@ async def tops_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     await update.message.reply_text(text, parse_mode="HTML")
 
-# ================= ADMIN: addadmin =================
+# ================= ADMIN: add/remove/list admins =================
 async def addadmin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if not is_owner(uid):
-        await update.message.reply_text("⚠ Owner မှသာ အသုံးပြုနိုင်ပါသည်")
+        await update.message.reply_text("⚠ Owner only command")
         return
     if len(context.args) != 1:
         await update.message.reply_text("Usage: /addadmin <user_id>")
@@ -663,7 +759,33 @@ async def addadmin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Invalid user_id")
         return
     safe_execute("INSERT OR IGNORE INTO admins(user_id) VALUES(?)", (target,), commit=True)
-    await update.message.reply_text(f"✅ {target} ကို admin ထည့်ပြီးပါပြီ")
+    await update.message.reply_text(f"✅ {target} ကို admin ပေးပြီးပါပြီ")
+
+async def removeadmin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if not is_owner(uid):
+        await update.message.reply_text("⚠ Owner only command")
+        return
+    if len(context.args) != 1:
+        await update.message.reply_text("Usage: /removeadmin <user_id>")
+        return
+    try:
+        target = int(context.args[0])
+    except Exception:
+        await update.message.reply_text("Invalid user_id")
+        return
+    safe_execute("DELETE FROM admins WHERE user_id=?", (target,), commit=True)
+    await update.message.reply_text(f"✅ {target} ကို admin အဖြစ် ဖယ်ရှားပြီးပါပြီ")
+
+async def admins_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    rows = safe_execute("SELECT user_id FROM admins", fetchall=True) or []
+    if not rows:
+        await update.message.reply_text("Admin မရှိသေးပါ")
+        return
+    text = "🛡 Admin List:\n\n"
+    for r in rows:
+        text += f"- {r[0]}\n"
+    await update.message.reply_text(text)
 
 # ================= ADMIN: addcoins (reply) =================
 async def addcoins_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -795,7 +917,32 @@ async def battle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(final_text)
 
-# ================= ADMIN: restore command =================
+# ================= ADMIN: backup/restore commands =================
+async def backup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if not is_admin(uid):
+        await update.message.reply_text("⚠ Admin only")
+        return
+    b = backup_db()
+    if b:
+        await update.message.reply_text(f"💾 Backup created: {os.path.basename(b)}")
+    else:
+        await update.message.reply_text("❌ Backup failed")
+
+async def backups_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if not is_admin(uid):
+        await update.message.reply_text("⚠ Admin only")
+        return
+    files = list_backups()
+    if not files:
+        await update.message.reply_text("📂 Backup မရှိသေးပါ")
+        return
+    text = "📂 Backup List:\n\n"
+    for i, f in enumerate(files, 1):
+        text += f"{i}. {f}\n"
+    await update.message.reply_text(text)
+
 async def restore_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if not is_owner(uid):
@@ -806,33 +953,13 @@ async def restore_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("♻️ Auto-restore ပြီးပါပြီ။ Bot ကို restart လိုအပ်နိုင်သည်။")
     else:
         await update.message.reply_text("❌ Restore မအောင်မြင်ပါ — Backup မရှိသေးပါ သို့မဟုတ် အမှားရှိပါသည်")
-# ================= BACKUPS LIST =================
-async def backups_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    if not is_owner(uid):
-        await update.message.reply_text("⚠ Owner only command")
-        return
-    files = list_backups()
-    if not files:
-        await update.message.reply_text("📂 Backup မရှိသေးပါ")
-        return
-    text = "📂 Backup List:\n\n"
-    for i, f in enumerate(files, 1):
-        text += f"{i}. {f}\n"
-    await update.message.reply_text(text)
-# ====== imports (ဖိုင်အထိ) ======
-import sys
-from threading import Thread  # အသုံးပြုထား already ရှိမယ်; ရှိပြန်ပါက ဒုတိယကြိမ် import မလိုပါ
 
 # ====== /restart handler ======
 async def restart_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    # Owner only
     if uid != OWNER_ID:
         await update.message.reply_text("⚠️ Owner only command")
         return
-
-    # Create a manual backup before restart
     try:
         bfile = backup_db()
         if bfile:
@@ -840,48 +967,131 @@ async def restart_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text("⚠ Backup မအောင်မြင်သော်လည်း Restart ပြုလုပ်မယ်...")
     except Exception:
-        # still attempt restart even if backup fails
         logger.exception("Backup before restart failed")
         await update.message.reply_text("⚠ Backup မအောင်မြင်သော်လည်း Restart ပြုလုပ်မည်။")
-
-    # Restart strategy:
-    # - If USE_SYSTEMD_RESTART=1 is set in env, exit process so systemd (or process manager) can restart it.
-    # - Otherwise use os.execv to re-exec the Python process (works for most direct runs).
     def _do_restart():
-        # small sleep to allow Telegram message to be sent
         time.sleep(1)
         try:
             if os.getenv("USE_SYSTEMD_RESTART", "0") == "1":
-                logger.info("Restart via exit (systemd/process manager expected to restart).")
+                logger.info("Restart via exit (systemd expected to restart).")
                 os._exit(0)
             else:
-                logger.info("Restart via os.execv (re-execing current Python process).")
+                logger.info("Restart via os.execv (re-execing).")
                 os.execv(sys.executable, [sys.executable] + sys.argv)
         except Exception:
-            logger.exception("Restart failed - exiting as fallback.")
+            logger.exception("Restart failed - exiting.")
             try:
                 os._exit(0)
             except Exception:
                 pass
-
-    # Start restart in background so handler can return cleanly
     t = Thread(target=_do_restart, daemon=True)
     t.start()
 
-# ===================== MAIN =====================
+# ================= QUEST SYSTEM =================
+async def createquest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if not is_owner(uid):
+        await update.message.reply_text("⚠ Owner only")
+        return
+    text_args = " ".join(context.args).strip()
+    # Expect format: Name|Coins|Exp|Description
+    if not text_args:
+        await update.message.reply_text("Usage: /createquest Name|Coins|Exp|Description")
+        return
+    parts = [p.strip() for p in text_args.split("|")]
+    if len(parts) < 4:
+        await update.message.reply_text("Usage: /createquest Name|Coins|Exp|Description")
+        return
+    name, coins_s, exp_s, desc = parts[0], parts[1], parts[2], parts[3]
+    try:
+        coins = int(coins_s); expv = int(exp_s)
+    except Exception:
+        await update.message.reply_text("Coins နှင့် Exp သည် ဂဏန်းဖြစ်ရပါမယ်")
+        return
+    cur = safe_execute("INSERT INTO quests(name, reward_coins, reward_exp, description) VALUES(?,?,?,?)",
+                       (name, coins, expv, desc), commit=True)
+    if cur:
+        await update.message.reply_text("✅ Quest created")
+    else:
+        await update.message.reply_text("❌ Quest creation failed")
+
+async def delquest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if not is_owner(uid):
+        await update.message.reply_text("⚠ Owner only")
+        return
+    if len(context.args) != 1:
+        await update.message.reply_text("Usage: /delquest <quest_id>")
+        return
+    try:
+        qid = int(context.args[0])
+    except Exception:
+        await update.message.reply_text("Invalid quest_id")
+        return
+    safe_execute("DELETE FROM quests WHERE id=?", (qid,), commit=True)
+    safe_execute("DELETE FROM user_quests WHERE quest_id=?", (qid,), commit=True)
+    await update.message.reply_text("✅ Quest deleted (if existed)")
+
+async def quest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    init_user(uid)
+    rows = safe_execute("SELECT id, name, reward_coins, reward_exp, description FROM quests", fetchall=True) or []
+    if not rows:
+        await update.message.reply_text("📜 Quest မရှိသေးပါ")
+        return
+    # Fetch user's claimed status
+    claimed = safe_execute("SELECT quest_id FROM user_quests WHERE user_id=? AND done=1", (uid,), fetchall=True) or []
+    claimed_set = {r[0] for r in claimed}
+    text = "📜 Quest List:\n\n"
+    for r in rows:
+        qid, name, coins, expv, desc = r
+        status = "✅ Claimed" if qid in claimed_set else "🔹 Available"
+        text += f"ID:{qid} {status}\n{name}\n{desc}\nReward: {coins} coins, {expv} EXP\n\n"
+    text += "Claim အတွက်: /claim <quest_id>"
+    await update.message.reply_text(text)
+
+async def claim_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    init_user(uid)
+    if len(context.args) != 1:
+        await update.message.reply_text("Usage: /claim <quest_id>")
+        return
+    try:
+        qid = int(context.args[0])
+    except Exception:
+        await update.message.reply_text("Invalid quest_id")
+        return
+    q = safe_execute("SELECT reward_coins, reward_exp FROM quests WHERE id=?", (qid,), fetchone=True)
+    if not q:
+        await update.message.reply_text("Quest မတွေ့ပါ")
+        return
+    # Check if already claimed
+    row = safe_execute("SELECT done FROM user_quests WHERE user_id=? AND quest_id=?", (uid, qid), fetchone=True)
+    if row and row[0] == 1:
+        await update.message.reply_text("❌ သင်သည် ဒီ Quest ကို ရယူပြီးသားဖြစ်သည်")
+        return
+    # Mark claimed (done=1). For more advanced, add conditions before claiming.
+    safe_execute("INSERT OR REPLACE INTO user_quests(user_id, quest_id, done) VALUES(?,?,1)", (uid, qid, 1), commit=True)
+    coins, expv = q
+    safe_execute("UPDATE users SET coins = coins + ? WHERE id=?", (coins, uid), commit=True)
+    leveled, new_lvl = add_exp(uid, expv)
+    msg = f"🎉 Quest claimed! +{coins} coins, +{expv} EXP"
+    if leveled:
+        msg += f"\n🎊 Level up! အဆင့် {new_lvl}"
+    await update.message.reply_text(msg)
+
+# ================= STARTUP / MAIN =================
 def main():
     keep_alive()
-    # Restore latest backup at startup if exists
+    # Try restore at startup if backup exists
     try:
         restore_last_backup()
     except Exception:
-        logger.exception("Startup restore failed (ignored)")
-    # Start auto backup thread
-    auto_backup(3600)  # backup every 1 hour (adjust as needed)
-
+        logger.exception("Startup restore (ignored) failed")
+    # Start periodic auto-backup
+    auto_backup(3600)  # every hour
     if not BOT_TOKEN:
-        raise SystemExit("❌ BOT_TOKEN မရှိပါ၊ .env ထဲမှာ ထည့်ပေးပါ။")
-
+        raise SystemExit("❌ BOT_TOKEN မရှိပါ၊ .env ထဲမှာ ထည့်ပါ။")
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     # Basic
@@ -908,18 +1118,33 @@ def main():
     # Leaderboard
     app.add_handler(CommandHandler("tops", tops_cmd))
 
-    # Admin Commands
+    # Admins
     app.add_handler(CommandHandler("addadmin", addadmin_cmd))
+    app.add_handler(CommandHandler("removeadmin", removeadmin_cmd))
+    app.add_handler(CommandHandler("admins", admins_cmd))
+
+    # Admin addcoins
     app.add_handler(CommandHandler("addcoins", addcoins_cmd))
+
+    # Gift
     app.add_handler(CommandHandler("gift", gift_cmd))          # reply mode
+
+    # Battle
     app.add_handler(CommandHandler("battle", battle_cmd))
 
-    # Admin restore / backup commands
+    # Backups & restart
+    app.add_handler(CommandHandler("backup", backup_cmd))
+    app.add_handler(CommandHandler("backups", backups_cmd))
     app.add_handler(CommandHandler("restore", restore_cmd))
-    app.add_handler(CommandHandler("backups", backups_cmd))  # ✅ added here
     app.add_handler(CommandHandler("restart", restart_cmd))
 
-    logger.info("✅ Bot စတင်လည်နေပါပြီ")
+    # Quest system
+    app.add_handler(CommandHandler("createquest", createquest_cmd))
+    app.add_handler(CommandHandler("delquest", delquest_cmd))
+    app.add_handler(CommandHandler("quest", quest_cmd))
+    app.add_handler(CommandHandler("claim", claim_cmd))
+
+    logger.info("✅ Bot started")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
