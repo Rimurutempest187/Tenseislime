@@ -806,6 +806,20 @@ async def restore_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("♻️ Auto-restore ပြီးပါပြီ။ Bot ကို restart လိုအပ်နိုင်သည်။")
     else:
         await update.message.reply_text("❌ Restore မအောင်မြင်ပါ — Backup မရှိသေးပါ သို့မဟုတ် အမှားရှိပါသည်")
+# ================= BACKUPS LIST =================
+async def backups_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if not is_owner(uid):
+        await update.message.reply_text("⚠ Owner only command")
+        return
+    files = list_backups()
+    if not files:
+        await update.message.reply_text("📂 Backup မရှိသေးပါ")
+        return
+    text = "📂 Backup List:\n\n"
+    for i, f in enumerate(files, 1):
+        text += f"{i}. {f}\n"
+    await update.message.reply_text(text)
 
 # ===================== MAIN =====================
 def main():
@@ -855,6 +869,9 @@ def main():
 
     # Admin restore control
     app.add_handler(CommandHandler("restore", restore_cmd))
+# Admin restore / backup commands
+    app.add_handler(CommandHandler("restore", restore_cmd))
+    app.add_handler(CommandHandler("backups", backups_cmd))  # ✅ added here
 
     logger.info("✅ Bot စတင်လည်နေပါပြီ")
     app.run_polling(drop_pending_updates=True)
