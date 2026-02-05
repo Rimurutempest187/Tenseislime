@@ -820,6 +820,53 @@ async def backups_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for i, f in enumerate(files, 1):
         text += f"{i}. {f}\n"
     await update.message.reply_text(text)
+# ====== imports (ဖိုင်အထိ) ======
+import sys
+from threading import Thread  # အသုံးပြုထား already ရှိမယ်; ရှိပြန်ပါက ဒုတိယကြိမ် import မလိုပါ
+
+# ====== /restart handler ======
+async def restart_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    # Owner only
+    if uid != OWNER_ID:
+        await update.message.reply_text("⚠️ Owner only command")
+        return
+
+    # Create a manual backup before restart
+    try:
+        bfile = backup_db()
+        if bfile:
+            await update.message.reply_text(f"💾 Backup created: {os.path.basename(bfile)}\n🔄 Restarting bot...")
+        else:
+            await update.message.reply_text("⚠ Backup မအောင်မြင်သော်လည်း Restart ပြုလုပ်မယ်...")
+    except Exception:
+        # still attempt restart even if backup fails
+        logger.exception("Backup before restart failed")
+        await update.message.reply_text("⚠ Backup မအောင်မြင်သော်လည်း Restart ပြုလုပ်မည်။")
+
+    # Restart strategy:
+    # - If USE_SYSTEMD_RESTART=1 is set in env, exit process so systemd (or process manager) can restart it.
+    # - Otherwise use os.execv to re-exec the Python process (works for most direct runs).
+    def _do_restart():
+        # small sleep to allow Telegram message to be sent
+        time.sleep(1)
+        try:
+            if os.getenv("USE_SYSTEMD_RESTART", "0") == "1":
+                logger.info("Restart via exit (systemd/process manager expected to restart).")
+                os._exit(0)
+            else:
+                logger.info("Restart via os.execv (re-execing current Python process).")
+                os.execv(sys.executable, [sys.executable] + sys.argv)
+        except Exception:
+            logger.exception("Restart failed - exiting as fallback.")
+            try:
+                os._exit(0)
+            except Exception:
+                pass
+
+    # Start restart in background so handler can return cleanly
+    t = Thread(target=_do_restart, daemon=True)
+    t.start()
 
 # ===================== MAIN =====================
 def main():
@@ -870,6 +917,7 @@ def main():
     # Admin restore / backup commands
     app.add_handler(CommandHandler("restore", restore_cmd))
     app.add_handler(CommandHandler("backups", backups_cmd))  # ✅ added here
+    app.add_handler(CommandHandler("restart", restart_cmd))
 
     logger.info("✅ Bot စတင်လည်နေပါပြီ")
     app.run_polling(drop_pending_updates=True)
