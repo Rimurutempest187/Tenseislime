@@ -867,9 +867,7 @@ def main():
     app.add_handler(CommandHandler("gift", gift_cmd))          # reply mode
     app.add_handler(CommandHandler("battle", battle_cmd))
 
-    # Admin restore control
-    app.add_handler(CommandHandler("restore", restore_cmd))
-# Admin restore / backup commands
+    # Admin restore / backup commands
     app.add_handler(CommandHandler("restore", restore_cmd))
     app.add_handler(CommandHandler("backups", backups_cmd))  # ✅ added here
 
